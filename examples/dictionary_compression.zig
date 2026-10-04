@@ -16,7 +16,8 @@ pub fn main() !void {
     std.debug.print("Trained dictionary size: {d}\n", .{trained.data.len});
     std.debug.assert(trained.data.len > 0);
     const data = "small message 4 with common prefix and extra content";
-    // Demonstrate compression with dictionary ID in frame header (dictionary-aware API)
+    // dict_id only tags the frame header for identification; it carries no
+    // dictionary content into compression, so it gives no ratio benefit.
     const opts = zstd.CompressionOptions{ .dict_id = dict.dictId() };
     const cs = try zstd.compressWithOptions(allocator, data, opts);
     defer allocator.free(cs);
@@ -24,4 +25,13 @@ pub fn main() !void {
     defer allocator.free(dec);
     std.debug.assert(std.mem.eql(u8, data, dec));
     std.debug.print("Dictionary example: {s} -> {d} bytes -> {s}\n", .{ data, cs.len, dec });
+
+    // compressWithDict actually seeds the match finder with the
+    // dictionary's bytes, so matching content in `data` compresses away.
+    const cs_dict = try zstd.compressWithDict(allocator, data, dict_data, .{});
+    defer allocator.free(cs_dict);
+    const dec_dict = try zstd.decompressWithDict(allocator, cs_dict, dict_data);
+    defer allocator.free(dec_dict);
+    std.debug.assert(std.mem.eql(u8, data, dec_dict));
+    std.debug.print("compressWithDict: {d} bytes (vs {d} bytes without dictionary content)\n", .{ cs_dict.len, cs.len });
 }

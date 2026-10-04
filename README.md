@@ -318,10 +318,19 @@ defer dict.deinit();
 var cdict = try builder.trainCover(samples, 6, 8);
 defer cdict.deinit();
 
-// Compress with dictionary ID
+// dict_id only tags the frame header for identification -- it does not
+// feed the dictionary's bytes into compression, so it gives no ratio benefit.
 const opts = zstd.CompressionOptions{ .dict_id = dict.dictId() };
 const compressed = try zstd.compressWithOptions(allocator, data, opts);
 defer allocator.free(compressed);
+
+// compressWithDict seeds compression with the dictionary's content, so
+// repeated content in `data` compresses away. Decompression needs the same
+// bytes; the streaming API has initWithDict equivalents.
+const compressed_dict = try zstd.compressWithDict(allocator, data, dict.content(), .{});
+defer allocator.free(compressed_dict);
+const decompressed_dict = try zstd.decompressWithDict(allocator, compressed_dict, dict.content());
+defer allocator.free(decompressed_dict);
 
 // Load existing dictionary
 var loaded = try zstd.loadDictionary(allocator, dict_bytes);
@@ -338,6 +347,8 @@ defer loaded.deinit();
 | `zstd.decompress(alloc, src)` | One-shot decompression |
 | `zstd.compressWithLevel(alloc, src, level)` | Compress with numeric level 1-22 |
 | `zstd.compressWithOptions(alloc, src, opts)` | Compress with `CompressionOptions` |
+| `zstd.compressWithDict(alloc, src, dict, opts)` | Compress with a raw-content dictionary (seeds the match finder, unlike `dict_id`) |
+| `zstd.decompressWithDict(alloc, src, dict)` | Decompress data produced by `compressWithDict`; single frame only |
 | `zstd.compressInto(dst, src, level)` | Compress into preallocated buffer |
 | `zstd.decompressInto(dst, src)` | Decompress into preallocated buffer |
 | `zstd.compressBound(src_size)` | Maximum compressed size for buffer allocation |
@@ -359,8 +370,8 @@ defer loaded.deinit();
 |---|---|
 | `CompressionContext` | Reusable compression context with `init(alloc)`, `initWithLevel(alloc, level)`, `compressAlloc(src)`, `compress(dst,src)`, `setLevel()`, `setChecksum()`, `setWindowLog()`, `deinit()` |
 | `DecompressionContext` | Reusable decompression context with `init(alloc)`, `decompressAlloc(src)`, `decompress(dst,src)`, `setMaxWindowSize()`, `deinit()` |
-| `StreamingCompressor` | Streaming compression with `init(alloc, level)`, `initWithOptions(alloc, opts)`, `compressStream(out,in,EndDirective)`, `reset()`, `deinit()` |
-| `StreamingDecompressor` | Streaming decompression with `init(alloc)`, `decompressStream(out,in)`, `decompressAll(out,in)`, `reset()`, `deinit()` |
+| `StreamingCompressor` | Streaming compression with `init(alloc, level)`, `initWithOptions(alloc, opts)`, `initWithDict(alloc, level, dict)`, `setDict(dict)`, `compressStream(out,in,EndDirective)`, `reset()`, `deinit()` |
+| `StreamingDecompressor` | Streaming decompression with `init(alloc)`, `initWithDict(alloc, dict)`, `decompressStream(out,in)`, `decompressAll(out,in)`, `reset()`, `deinit()` |
 | `Dictionary` | Loaded dictionary with `dictId()`, `content()`, `deinit()` |
 | `DictionaryBuilder` | Builder with `init(alloc, params)`, `train(samples)`, `trainCover(k,d)`, `trainFastCover(k,d,f,accel)` |
 | `CompressionOptions` | Options struct with level, window_log, hash_log, chain_log, search_log, min_match, target_length, strategy, checksum, dict_id, content_size, enable_ldm |

@@ -1,11 +1,11 @@
 ---
 title: Dictionary Compression
-description: Dictionary creation and header dict_id handling.
+description: Dictionary creation, header dict_id handling, and real content-dictionary compression with compressWithDict.
 ---
 
 # Dictionary Compression
 
-`examples/dictionary_compression.zig` — `createDictionaryFromData` and `dict_id`.
+`examples/dictionary_compression.zig` — `createDictionaryFromData`, `dict_id`, and `compressWithDict`/`decompressWithDict`.
 
 ## Client Code
 
@@ -28,6 +28,8 @@ pub fn main() !void {
     std.debug.print("Trained dictionary size: {d}\n", .{trained.data.len});
     std.debug.assert(trained.data.len > 0);
     const data = "small message 4 with common prefix and extra content";
+    // dict_id only tags the frame header for identification; it carries no
+    // dictionary content into compression, so it gives no ratio benefit.
     const opts = zstd.CompressionOptions{ .dict_id = dict.dictId() };
     const cs = try zstd.compressWithOptions(allocator, data, opts);
     defer allocator.free(cs);
@@ -35,6 +37,15 @@ pub fn main() !void {
     defer allocator.free(dec);
     std.debug.assert(std.mem.eql(u8, data, dec));
     std.debug.print("Dictionary example: {s} -> {d} bytes -> {s}\n", .{ data, cs.len, dec });
+
+    // compressWithDict actually seeds the match finder with the
+    // dictionary's bytes, so matching content in `data` compresses away.
+    const cs_dict = try zstd.compressWithDict(allocator, data, dict_data, .{});
+    defer allocator.free(cs_dict);
+    const dec_dict = try zstd.decompressWithDict(allocator, cs_dict, dict_data);
+    defer allocator.free(dec_dict);
+    std.debug.assert(std.mem.eql(u8, data, dec_dict));
+    std.debug.print("compressWithDict: {d} bytes (vs {d} bytes without dictionary content)\n", .{ cs_dict.len, cs.len });
 }
 ```
 
@@ -42,15 +53,17 @@ pub fn main() !void {
 
 ```text
 Dictionary ID: 12345, size: 71
-Trained dictionary size: 450
+Trained dictionary size: 110
 Dictionary example: small message 4 with common prefix and extra content -> 63 bytes -> small message 4 with common prefix and extra content
+compressWithDict: 45 bytes (vs 63 bytes without dictionary content)
 ```
 
 ## Explanation
 
 - `createDictionaryFromData(allocator, bytes, 12345)` writes `MAGIC_DICTIONARY (0xEC30A437)` + `dict_id` header.
 - `DictionaryBuilder.train` / `loadDictionary` / `dict.content()` / `dictId()` expose dictionary handling.
-- `CompressionOptions{ .dict_id }` sets `Dictionary_ID_flag` in `FHD`; `getFrameHeader` can verify `dict_id` on decompress.
+- `CompressionOptions{ .dict_id }` sets `Dictionary_ID_flag` in `FHD`; `getFrameHeader` can verify `dict_id` on decompress -- it does **not** feed the dictionary's bytes into compression.
+- `compressWithDict`/`decompressWithDict` (and `StreamingCompressor.initWithDict`/`StreamingDecompressor.initWithDict` for the streaming API) are the raw-content-dictionary functions: they seed the match finder/history with the dictionary's actual bytes, so repeated content in `data` is encoded as a backreference into the dictionary instead of literal bytes. The same dictionary bytes must be supplied on both ends.
 
 Run:
 
