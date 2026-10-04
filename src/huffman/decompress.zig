@@ -32,7 +32,7 @@ pub fn buildDecoder(allocator: std.mem.Allocator, weights: []const u8, table_log
     errdefer allocator.free(table);
     @memset(table, Entry{ .symbol = 0, .nb_bits = 0 });
 
-    var rank_val = [_]u32{0} ** 13;
+    var rank_val: [13]u32 = @splat(0);
     for (weights) |w| {
         if (w == 0) continue; // zero-weight symbols are unused (C skips them)
         rank_val[w] += 1;
@@ -277,8 +277,8 @@ pub fn decode4Streams(dst: []u8, src: []const u8, decoder: *const HuffDecoder) e
 
 pub fn decompressHuffmanBlock(allocator: std.mem.Allocator, dst: []u8, src: []const u8) errors.ZstdError!usize {
     if (src.len < 1) return error.SrcSizeWrong;
-    var huff_weight = [_]u8{0} ** 256;
-    var rank_stats = [_]u32{0} ** 16;
+    var huff_weight: [256]u8 = @splat(0);
+    var rank_stats: [16]u32 = @splat(0);
     var nb_symbols: usize = 0;
     var table_log: u8 = 0;
 

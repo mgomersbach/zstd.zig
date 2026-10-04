@@ -96,7 +96,7 @@ pub const XxHash64State = struct {
         return .{
             .seed = seed,
             .total_len = 0,
-            .buffer = [_]u8{0} ** 32,
+            .buffer = @splat(0),
             .buffered = 0,
             .v1 = seed +% PRIME64_1 +% PRIME64_2,
             .v2 = seed +% PRIME64_2,

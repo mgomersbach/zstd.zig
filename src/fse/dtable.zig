@@ -136,7 +136,7 @@ test "dtable simple distribution" {
     var t = try build(testing.allocator, &norm, 2, 5);
     defer t.deinit();
     try testing.expectEqual(@as(usize, 32), t.entries.len);
-    var covered = [_]bool{false} ** 32;
+    var covered: [32]bool = @splat(false);
     for (t.entries) |e| {
         const span = @as(usize, 1) << @intCast(e.nb_bits);
         var k: usize = 0;

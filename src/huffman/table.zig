@@ -16,8 +16,8 @@ pub const HuffmanTable = struct {
 
 pub fn buildTableFromWeights(allocator: std.mem.Allocator, weights: []const u8, max_bits: u8) errors.ZstdError!HuffmanTable {
     if (weights.len == 0) return error.InvalidHuffmanTable;
-    var nb_per_rank = [_]u16{0} ** 16;
-    var val_per_rank = [_]u16{0} ** 16;
+    var nb_per_rank: [16]u16 = @splat(0);
+    var val_per_rank: [16]u16 = @splat(0);
 
     const symbols = try allocator.alloc(u8, weights.len);
     errdefer allocator.free(symbols);

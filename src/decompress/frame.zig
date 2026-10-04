@@ -112,13 +112,24 @@ pub fn skipFrame(src: []const u8) errors.ZstdError!usize {
 
 const testing = std.testing;
 
+/// `s` repeated `n` times, as `"s" ** n` used to produce before Zig 0.17
+/// removed array multiplication. Test-fixture data only.
+fn repeatString(comptime s: []const u8, comptime n: usize) []const u8 {
+    const buf: [s.len * n]u8 = comptime blk: {
+        var b: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(b[i * s.len ..][0..s.len], s);
+        break :blk b;
+    };
+    return &buf;
+}
+
 test "decompressFrame round trip and consumed size" {
     const compress_mod = @import("../compress/compress.zig");
     const alloc = testing.allocator;
     var state = entropy_mod.State.init(alloc);
     defer state.deinit();
 
-    const payload = "frame-level round trip payload " ** 20;
+    const payload = repeatString("frame-level round trip payload ", 20);
     const comp = try compress_mod.compress(alloc, payload, .{});
     defer alloc.free(comp);
 

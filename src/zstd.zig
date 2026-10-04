@@ -741,9 +741,20 @@ test "multi-block frame crosses block boundary" {
     try testing.expectEqualSlices(u8, src, d);
 }
 
+/// `s` repeated `n` times, as `"s" ** n` used to produce before Zig 0.17
+/// removed array multiplication. Test-fixture data only.
+fn repeatString(comptime s: []const u8, comptime n: usize) []const u8 {
+    const buf: [s.len * n]u8 = comptime blk: {
+        var b: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(b[i * s.len ..][0..s.len], s);
+        break :blk b;
+    };
+    return &buf;
+}
+
 test "checksum detects single flipped bit" {
     const alloc = testing.allocator;
-    const src = "checksum bit-flip detection payload " ** 10;
+    const src = repeatString("checksum bit-flip detection payload ", 10);
     const c = try compressWithOptions(alloc, src, .{ .checksum = true });
     defer alloc.free(c);
     var bad = try alloc.dupe(u8, c);
@@ -754,7 +765,7 @@ test "checksum detects single flipped bit" {
 
 test "corrupted payload byte fails via checksum" {
     const alloc = testing.allocator;
-    const src = "payload to corrupt mid-stream for safety checks" ** 5;
+    const src = repeatString("payload to corrupt mid-stream for safety checks", 5);
     const c = try compressWithOptions(alloc, src, .{ .checksum = true });
     defer alloc.free(c);
     var bad = try alloc.dupe(u8, c);
@@ -840,7 +851,7 @@ test "decompressWithDict accepts valid frames" {
 
 test "streaming chunk boundaries 1..17 bytes" {
     const alloc = testing.allocator;
-    const src = "chunked streaming boundary sweep for zstd.zig" ** 6;
+    const src = repeatString("chunked streaming boundary sweep for zstd.zig", 6);
     const c = try compress(alloc, src);
     defer alloc.free(c);
     for (1..18) |step| {

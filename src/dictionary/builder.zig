@@ -243,9 +243,20 @@ test "trainCover prefers recurring chunks" {
     try testing.expect(std.mem.indexOf(u8, dict.content(), "recurring") != null);
 }
 
+/// `s` repeated `n` times, as `"s" ** n` used to produce before Zig 0.17
+/// removed array multiplication. Test-fixture data only.
+fn repeatString(comptime s: []const u8, comptime n: usize) []const u8 {
+    const buf: [s.len * n]u8 = comptime blk: {
+        var b: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(b[i * s.len ..][0..s.len], s);
+        break :blk b;
+    };
+    return &buf;
+}
+
 test "trainFastCover respects accel stride" {
     const alloc = testing.allocator;
-    const samples = [_][]const u8{"abcdefgh" ** 8};
+    const samples = [_][]const u8{repeatString("abcdefgh", 8)};
     var dict = try trainFastCoverImpl(alloc, &samples, .{ .dict_size = 64 }, 6, 16, 6, 2);
     defer dict.deinit();
     try testing.expect(dict.data.len > 0);

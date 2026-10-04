@@ -61,7 +61,7 @@ test "buildFseTable covers full distribution" {
     var t = try buildFseTable(testing.allocator, &norm, norm.len - 1, 5);
     defer t.deinit();
     try testing.expectEqual(@as(usize, 32), t.table_size);
-    var covered = [_]bool{false} ** 32;
+    var covered: [32]bool = @splat(false);
     for (t.nb_bits, t.new_state_base) |bits, base| {
         const span = @as(usize, 1) << @intCast(bits);
         var k: usize = 0;

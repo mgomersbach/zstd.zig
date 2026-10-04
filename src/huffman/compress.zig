@@ -22,7 +22,7 @@ pub const HuffCElt = struct {
 pub const HuffCTable = struct {
     table_log: u8 = 0,
     max_symbol_value: u8 = 0,
-    elts: [256]HuffCElt = [_]HuffCElt{.{}} ** 256,
+    elts: [256]HuffCElt = @splat(.{}),
 };
 
 pub fn countFrequencies(counts: []u32, src: []const u8) usize {
@@ -146,7 +146,7 @@ pub fn setMaxHeight(nodes: []NodeElt, last_non_null: usize, target_nb_bits: u8) 
 
     // Phase 2: repay cost by promoting nodes from longer-bit ranks
     // Build rankLast[diff] = position of last symbol at (target_nb_bits - diff)
-    var rank_last = [_]u32{no_symbol} ** (max_table_log + 2);
+    var rank_last: [max_table_log + 2]u32 = @splat(no_symbol);
     {
         var current_nb_bits: u8 = target_nb_bits;
         var pos = n;
@@ -212,7 +212,7 @@ pub fn setMaxHeight(nodes: []NodeElt, last_non_null: usize, target_nb_bits: u8) 
 }
 
 pub fn buildCTable(ctable: *HuffCTable, counts: []const u32, max_symbol: usize, max_nb_bits_in: u8) errors.ZstdError!u8 {
-    var nodes = [_]NodeElt{.{}} ** (2 * (symbol_value_max + 1));
+    var nodes: [2 * (symbol_value_max + 1)]NodeElt = @splat(.{});
     for (0..max_symbol + 1) |s| {
         nodes[s].count = counts[s];
         nodes[s].byte = @truncate(s);
@@ -233,8 +233,8 @@ pub fn buildCTable(ctable: *HuffCTable, counts: []const u32, max_symbol: usize, 
     max_nb_bits = setMaxHeight(&nodes, non_null, max_nb_bits);
 
     // Compute nb_per_rank: count of symbols per bit-depth
-    var nb_per_rank = [_]u16{0} ** 16;
-    var val_per_rank = [_]u16{0} ** 16;
+    var nb_per_rank: [16]u16 = @splat(0);
+    var val_per_rank: [16]u16 = @splat(0);
     for (0..non_null + 1) |i| {
         nb_per_rank[nodes[i].nb_bits] += 1;
     }
@@ -279,7 +279,7 @@ pub fn writeCTable(dst: []u8, ctable: *const HuffCTable, allocator: std.mem.Allo
 
     // Try FSE compression of weights (for symbols 0..max_symbol_value-1; last weight is implicit)
     if (ctable.max_symbol_value >= 2) {
-        var w_counts = [_]u32{0} ** 16;
+        var w_counts: [16]u32 = @splat(0);
         var max_w: usize = 0;
         for (0..ctable.max_symbol_value) |s| {
             const w = weights[s];
@@ -289,7 +289,7 @@ pub fn writeCTable(dst: []u8, ctable: *const HuffCTable, allocator: std.mem.Allo
 
         const wt_size = ctable.max_symbol_value;
         const opt_log = fse_compress_mod.optimalTableLog(6, wt_size, max_w);
-        var norm = [_]i16{0} ** 16;
+        var norm: [16]i16 = @splat(0);
         if (fse_compress_mod.normalizeCountsExt(&norm, w_counts[0 .. max_w + 1], opt_log, wt_size, false)) |tlog| {
             if (dst.len > 2) {
                 const header_len = try fse_compress_mod.writeNCount(dst[1..], &norm, max_w, tlog);
@@ -390,7 +390,7 @@ pub fn compress4X(dst: []u8, src: []const u8, ctable: *const HuffCTable) errors.
 
 pub fn compressHuffman(dst: []u8, src: []const u8) errors.ZstdError!usize {
     if (src.len == 0) return 0;
-    var counts = [_]u32{0} ** 256;
+    var counts: [256]u32 = @splat(0);
     const max_sym = countFrequencies(&counts, src);
     var ctable: HuffCTable = .{};
     _ = try buildCTable(&ctable, &counts, max_sym, max_table_log);

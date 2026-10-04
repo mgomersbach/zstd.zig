@@ -137,9 +137,20 @@ test "countMatchLength empty" {
     try testing.expectEqual(@as(usize, 0), countMatchLength(&a, &b));
 }
 
+/// `s` repeated `n` times, as `"s" ** n` used to produce before Zig 0.17
+/// removed array multiplication. Test-fixture data only.
+fn repeatString(comptime s: []const u8, comptime n: usize) []const u8 {
+    const buf: [s.len * n]u8 = comptime blk: {
+        var b: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(b[i * s.len ..][0..s.len], s);
+        break :blk b;
+    };
+    return &buf;
+}
+
 test "findMatches finds repeats" {
     const alloc = testing.allocator;
-    const src = "abcdef" ** 20;
+    const src = repeatString("abcdef", 20);
     const matches = try findMatches(alloc, src, 12);
     defer alloc.free(matches);
     try testing.expect(matches.len > 0);
