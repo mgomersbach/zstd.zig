@@ -66,6 +66,12 @@ pub fn decompress(allocator: std.mem.Allocator, src: []const u8) anyerror![]u8 {
     return decomp.decompress(allocator, src);
 }
 
+/// Decode side of `compressWithDict`: `dict` must be the exact bytes passed
+/// to compression. Scoped to a single frame -- see `decomp.decompressWithDict`.
+pub fn decompressWithDict(allocator: std.mem.Allocator, src: []const u8, dict: []const u8) anyerror![]u8 {
+    return decomp.decompressAllocWithDict(allocator, src, dict);
+}
+
 pub fn compressWithLevel(allocator: std.mem.Allocator, src: []const u8, level: i32) anyerror![]u8 {
     const opts = comp.getCompressionParameters(level, src.len, 0);
     return comp.compress(allocator, src, opts);
@@ -73,6 +79,13 @@ pub fn compressWithLevel(allocator: std.mem.Allocator, src: []const u8, level: i
 
 pub fn compressWithOptions(allocator: std.mem.Allocator, src: []const u8, options: CompressionOptions) anyerror![]u8 {
     return comp.compress(allocator, src, options);
+}
+
+/// Raw-content-dictionary compression: `dict` seeds the match finder as if
+/// it immediately preceded `src`, letting `src` reference into it. Pass the
+/// identical `dict` bytes to `decompressWithDict` to recover `src`.
+pub fn compressWithDict(allocator: std.mem.Allocator, src: []const u8, dict: []const u8, options: CompressionOptions) anyerror![]u8 {
+    return comp.compressWithDict(allocator, src, dict, options);
 }
 
 pub fn compressInto(dst: []u8, src: []const u8, level: i32) ZstdError!usize {
@@ -837,6 +850,59 @@ test "dictionary roundtrip through context" {
     defer alloc.free(comp_bytes);
     const frame_hdr = try getFrameHeader(comp_bytes);
     try testing.expectEqual(@as(u32, 77), frame_hdr.dict_id);
+}
+
+test "compressWithDict/decompressWithDict round trip" {
+    const alloc = testing.allocator;
+    const dict = repeatString("The quick brown fox jumps over the lazy dog. ", 4);
+    const src = repeatString("The quick brown fox jumps over the lazy dog. unique tail content. ", 2);
+
+    const c = try compressWithDict(alloc, src, dict, .{});
+    defer alloc.free(c);
+    const d = try decompressWithDict(alloc, c, dict);
+    defer alloc.free(d);
+    try testing.expectEqualStrings(src, d);
+}
+
+test "compressWithDict actually shrinks output versus no dictionary" {
+    const alloc = testing.allocator;
+    const dict = repeatString("The quick brown fox jumps over the lazy dog. ", 20);
+    const src = repeatString("The quick brown fox jumps over the lazy dog. ", 4);
+
+    const with_dict = try compressWithDict(alloc, src, dict, .{});
+    defer alloc.free(with_dict);
+    const without_dict = try compress(alloc, src);
+    defer alloc.free(without_dict);
+    try testing.expect(with_dict.len < without_dict.len);
+}
+
+test "decompressWithDict requires the matching dictionary" {
+    const alloc = testing.allocator;
+    const dict = repeatString("The quick brown fox jumps over the lazy dog. ", 4);
+    const src = repeatString("The quick brown fox jumps over the lazy dog. unique tail content. ", 2);
+
+    const c = try compressWithDict(alloc, src, dict, .{});
+    defer alloc.free(c);
+
+    // Either the wrong dictionary is detectably rejected, or decoding
+    // succeeds but does not recover the original -- never silently correct.
+    if (decompressWithDict(alloc, c, "completely unrelated dictionary bytes!!")) |wrong| {
+        defer alloc.free(wrong);
+        try testing.expect(!std.mem.eql(u8, src, wrong));
+    } else |_| {}
+}
+
+test "decompressWithDict rejects concatenated frames" {
+    const alloc = testing.allocator;
+    const dict = "shared prefix content";
+    const one = try compressWithDict(alloc, "first frame", dict, .{});
+    defer alloc.free(one);
+    const two = try compressWithDict(alloc, "second frame", dict, .{});
+    defer alloc.free(two);
+    const both = try std.mem.concat(alloc, u8, &.{ one, two });
+    defer alloc.free(both);
+
+    try testing.expectError(error.UnsupportedFeature, decompressWithDict(alloc, both, dict));
 }
 
 test "decompressWithDict accepts valid frames" {

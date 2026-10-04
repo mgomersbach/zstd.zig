@@ -185,9 +185,102 @@ pub fn decompressInto(dst: []u8, src: []const u8) errors.ZstdError!usize {
     return dst_pos;
 }
 
+/// Allocating counterpart of `decompressWithDict`.
+pub fn decompressAllocWithDict(allocator: std.mem.Allocator, src: []const u8, dict: []const u8) anyerror![]u8 {
+    const bound = try decompressBound(src);
+    const safe_bound = if (bound == 0) src.len * 4 + 1024 else bound;
+    const dst = try allocator.alloc(u8, safe_bound);
+    errdefer allocator.free(dst);
+    const out_size = try decompressWithDict(dst, src, dict);
+    if (out_size == dst.len) return dst;
+    const trimmed = try allocator.realloc(dst, out_size);
+    return trimmed;
+}
+
+/// As `decompressInto`, but the back-reference window is seeded with `dict`
+/// as though it preceded the frame's output -- the decode side of
+/// `compress.compressWithDict`'s raw-content dictionary.
+///
+/// `src` must be exactly one zstd frame; anything else returns
+/// `error.UnsupportedFeature`.
 pub fn decompressWithDict(dst: []u8, src: []const u8, dict: []const u8) errors.ZstdError!usize {
-    _ = dict;
-    return decompressInto(dst, src);
+    if (dict.len == 0) return decompressInto(dst, src);
+    if (src.len < 4) return error.SrcSizeWrong;
+    const magic = readLE32(src);
+    if (magic != constants.magic_number) return error.PrefixUnknown;
+
+    var gpa_state = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa_state.deinit();
+    const alloc = gpa_state.allocator();
+    var entropy_state = entropy_mod.State.init(alloc);
+    defer entropy_state.deinit();
+
+    const fh = try header_mod.getFrameHeader(src);
+    // `scratch` holds dict ++ this frame's decoded bytes, contiguously, so
+    // the existing `history`-as-a-slice decoder needs no changes at all.
+    const scratch = try alloc.alloc(u8, dict.len + dst.len);
+    defer alloc.free(scratch);
+    @memcpy(scratch[0..dict.len], dict);
+
+    var frame_src_pos: usize = fh.header_size;
+    var dst_pos: usize = dict.len;
+    var checksum_state = checksum_mod.ChecksumState.init();
+    var last = false;
+    while (!last) {
+        if (src.len < frame_src_pos + 3) return error.SrcSizeWrong;
+        const prop = try block_mod.getBlockHeader(src[frame_src_pos..]);
+        last = prop.last_block;
+        const csize = prop.orig_size;
+        frame_src_pos += 3;
+        switch (prop.block_type) {
+            .raw => {
+                if (src.len < frame_src_pos + csize) return error.SrcSizeWrong;
+                if (scratch.len < dst_pos + csize) return error.DstSizeTooSmall;
+                @memcpy(scratch[dst_pos .. dst_pos + csize], src[frame_src_pos .. frame_src_pos + csize]);
+                checksum_state.update(scratch[dst_pos .. dst_pos + csize]);
+                dst_pos += csize;
+                frame_src_pos += csize;
+            },
+            .rle => {
+                if (src.len < frame_src_pos + 1) return error.SrcSizeWrong;
+                const byte = src[frame_src_pos];
+                frame_src_pos += 1;
+                if (scratch.len < dst_pos + csize) return error.DstSizeTooSmall;
+                @memset(scratch[dst_pos .. dst_pos + csize], byte);
+                checksum_state.update(scratch[dst_pos .. dst_pos + csize]);
+                dst_pos += csize;
+            },
+            .compressed => {
+                if (src.len < frame_src_pos + csize) return error.SrcSizeWrong;
+                const window = scratch[0..dst_pos]; // dict ++ decoded-so-far
+                const decoded = block_decompress.decompressBlock(
+                    &entropy_state,
+                    scratch[dst_pos..],
+                    src[frame_src_pos - 3 .. frame_src_pos + csize],
+                    window,
+                ) catch |e| return e;
+                checksum_state.update(scratch[dst_pos .. dst_pos + decoded]);
+                dst_pos += decoded;
+                frame_src_pos += csize;
+            },
+            .reserved => return error.InvalidBlock,
+        }
+    }
+    if (fh.checksum_flag) {
+        if (src.len < frame_src_pos + 4) return error.ChecksumWrong;
+        const expected = checksum_mod.readChecksum(src[frame_src_pos..]);
+        const got = checksum_state.final();
+        if (expected != got) return error.ChecksumWrong;
+        frame_src_pos += 4;
+    }
+    const content_len = dst_pos - dict.len;
+    if (fh.content_size != constants.contentsize_unknown and fh.content_size != constants.contentsize_error) {
+        if (content_len != fh.content_size) return error.ContentSizeMismatch;
+    }
+    if (frame_src_pos != src.len) return error.UnsupportedFeature; // concatenated frames with a dict
+    if (dst.len < content_len) return error.DstSizeTooSmall;
+    @memcpy(dst[0..content_len], scratch[dict.len .. dict.len + content_len]);
+    return content_len;
 }
 
 fn readLE32(p: []const u8) u32 {

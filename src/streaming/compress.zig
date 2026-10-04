@@ -16,6 +16,9 @@ pub const StreamingCompressor = struct {
     finished: bool,
     header_written: bool,
     level: i32,
+    /// Raw-content dictionary, as in `compress.compressWithDict`: each block
+    /// is seeded with it independently.
+    dict: []const u8 = &[_]u8{},
 
     pub fn init(allocator: std.mem.Allocator, level: i32) !StreamingCompressor {
         return StreamingCompressor{
@@ -41,6 +44,12 @@ pub const StreamingCompressor = struct {
         };
     }
 
+    pub fn initWithDict(allocator: std.mem.Allocator, level: i32, dict: []const u8) !StreamingCompressor {
+        var self = try init(allocator, level);
+        self.dict = dict;
+        return self;
+    }
+
     pub fn deinit(self: *StreamingCompressor) void {
         self.buffer.deinit(self.allocator);
     }
@@ -51,6 +60,13 @@ pub const StreamingCompressor = struct {
 
     pub fn setChecksumFlag(self: *StreamingCompressor, flag: bool) void {
         self.options.checksum = flag;
+    }
+
+    /// Must be called before the first `compressStream` (i.e. before any
+    /// data or the header has been written); there is no per-block
+    /// dictionary swap mid-stream.
+    pub fn setDict(self: *StreamingCompressor, dict: []const u8) void {
+        self.dict = dict;
     }
 
     pub fn compressStream(self: *StreamingCompressor, out: []u8, in_data: []const u8, directive: EndDirective) errors.ZstdError!struct { in_consumed: usize, out_produced: usize, remaining: usize } {
@@ -78,7 +94,7 @@ pub const StreamingCompressor = struct {
                     const is_last = directive == .end and src_pos + chunk >= to_compress.len;
                     const block_buf = out[out_pos..];
                     if (block_buf.len < chunk + 3) return error.DstSizeTooSmall;
-                    const written = try block_mod.compressBlock(block_buf, to_compress[src_pos .. src_pos + chunk], is_last);
+                    const written = try block_mod.compressBlock(block_buf, to_compress[src_pos .. src_pos + chunk], self.dict, is_last);
                     out_pos += written;
                     src_pos += chunk;
                     remaining -= chunk;
@@ -95,7 +111,7 @@ pub const StreamingCompressor = struct {
                 }
             } else if (directive == .end) {
                 if (out.len < out_pos + 3) return error.DstSizeTooSmall;
-                const written = try block_mod.compressBlock(out[out_pos..], &[_]u8{}, true);
+                const written = try block_mod.compressBlock(out[out_pos..], &[_]u8{}, self.dict, true);
                 out_pos += written;
             }
         }
@@ -187,4 +203,56 @@ test "StreamingCompressor reset" {
     sc.reset();
     try testing.expect(!sc.finished);
     try testing.expect(!sc.header_written);
+}
+
+test "StreamingCompressor initWithDict shrinks output versus no dictionary" {
+    const alloc = testing.allocator;
+    const decompress_mod = @import("../decompress/decompress.zig");
+    const dict = repeatString("The quick brown fox jumps over the lazy dog. ", 20);
+    const src = repeatString("The quick brown fox jumps over the lazy dog. ", 4);
+
+    var with_dict = try StreamingCompressor.initWithDict(alloc, 3, dict);
+    defer with_dict.deinit();
+    var buf1: [4096]u8 = undefined;
+    const r1 = try with_dict.compressStream(&buf1, src, .end);
+
+    var without_dict = try StreamingCompressor.init(alloc, 3);
+    defer without_dict.deinit();
+    var buf2: [4096]u8 = undefined;
+    const r2 = try without_dict.compressStream(&buf2, src, .end);
+
+    try testing.expect(r1.out_produced < r2.out_produced);
+
+    const decoded = try decompress_mod.decompressAllocWithDict(alloc, buf1[0..r1.out_produced], dict);
+    defer alloc.free(decoded);
+    try testing.expectEqualStrings(src, decoded);
+}
+
+test "StreamingCompressor setDict matches initWithDict" {
+    const alloc = testing.allocator;
+    const dict = "shared streaming dictionary content";
+
+    var a = try StreamingCompressor.initWithDict(alloc, 3, dict);
+    defer a.deinit();
+    var buf_a: [4096]u8 = undefined;
+    const ra = try a.compressStream(&buf_a, "payload", .end);
+
+    var b = try StreamingCompressor.init(alloc, 3);
+    defer b.deinit();
+    b.setDict(dict);
+    var buf_b: [4096]u8 = undefined;
+    const rb = try b.compressStream(&buf_b, "payload", .end);
+
+    try testing.expectEqualSlices(u8, buf_a[0..ra.out_produced], buf_b[0..rb.out_produced]);
+}
+
+/// `s` repeated `n` times, as `"s" ** n` used to produce before Zig 0.17
+/// removed array multiplication. Test-fixture data only.
+fn repeatString(comptime s: []const u8, comptime n: usize) []const u8 {
+    const buf: [s.len * n]u8 = comptime blk: {
+        var b: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(b[i * s.len ..][0..s.len], s);
+        break :blk b;
+    };
+    return &buf;
 }

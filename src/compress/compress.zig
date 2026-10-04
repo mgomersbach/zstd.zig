@@ -25,16 +25,28 @@ pub fn compressBound(src_size: usize) usize {
 }
 
 pub fn compress(allocator: std.mem.Allocator, src: []const u8, options: CompressionOptions) anyerror![]u8 {
+    return compressWithDict(allocator, src, &[_]u8{}, options);
+}
+
+pub fn compressWithDict(allocator: std.mem.Allocator, src: []const u8, dict: []const u8, options: CompressionOptions) anyerror![]u8 {
     const bound = compressBound(src.len);
     const dst = try allocator.alloc(u8, bound);
     errdefer allocator.free(dst);
-    const written = try compressInto(dst, src, options);
+    const written = try compressIntoWithDict(dst, src, dict, options);
     if (written == dst.len) return dst;
     const trimmed = try allocator.realloc(dst, written);
     return trimmed;
 }
 
 pub fn compressInto(dst: []u8, src: []const u8, options: CompressionOptions) errors.ZstdError!usize {
+    return compressIntoWithDict(dst, src, &[_]u8{}, options);
+}
+
+/// As `compressInto`, but each block is seeded with `dict` as content just
+/// before it (zstd's raw-content dictionary mode). Blocks are seeded
+/// independently, matching the per-block scope of this implementation.
+/// `dict` is never written to `dst`; decompression needs the same `dict`.
+pub fn compressIntoWithDict(dst: []u8, src: []const u8, dict: []const u8, options: CompressionOptions) errors.ZstdError!usize {
     if (dst.len < compressBound(src.len)) return error.DstSizeTooSmall;
     var pos: usize = 0;
     const content_size: ?u64 = options.content_size orelse @as(?u64, src.len);
@@ -48,12 +60,12 @@ pub fn compressInto(dst: []u8, src: []const u8, options: CompressionOptions) err
         const remaining = src.len - src_pos;
         const chunk = @min(remaining, block_max);
         const is_last = src_pos + chunk >= src.len;
-        const written = try block_mod.compressBlockWithStrategy(dst[pos..], src[src_pos .. src_pos + chunk], is_last, options.strategy, options.level);
+        const written = try block_mod.compressBlockWithStrategy(dst[pos..], src[src_pos .. src_pos + chunk], dict, is_last, options.strategy, options.level);
         pos += written;
         src_pos += chunk;
     }
     if (src.len == 0) {
-        const written = try block_mod.compressBlockWithStrategy(dst[pos..], src, true, options.strategy, options.level);
+        const written = try block_mod.compressBlockWithStrategy(dst[pos..], src, dict, true, options.strategy, options.level);
         pos += written;
     }
     if (options.checksum) {

@@ -12,12 +12,16 @@ const entropy_mod = @import("../decompress/entropy.zig");
 pub const StreamingDecompressor = struct {
     allocator: std.mem.Allocator,
     in_buffer: std.ArrayList(u8),
+    /// Back-reference history: starts as `dict` (if any) and grows with
+    /// decoded output. Never trimmed, so `dict`'s bytes are never copied
+    /// into a caller's `out`.
     out_buffer: std.ArrayList(u8),
     stage: Stage,
     frame_header: ?types.FrameHeader,
     checksum_state: checksum_mod.ChecksumState,
     entropy: entropy_mod.State,
     finished: bool,
+    dict: []const u8 = &[_]u8{},
 
     const Stage = enum { header, blocks, checksum, done };
 
@@ -32,6 +36,13 @@ pub const StreamingDecompressor = struct {
             .entropy = entropy_mod.State.init(allocator),
             .finished = false,
         };
+    }
+
+    pub fn initWithDict(allocator: std.mem.Allocator, dict: []const u8) !StreamingDecompressor {
+        var self = init(allocator);
+        self.dict = dict;
+        try self.out_buffer.appendSlice(allocator, dict);
+        return self;
     }
 
     pub fn deinit(self: *StreamingDecompressor) void {
@@ -131,6 +142,7 @@ pub const StreamingDecompressor = struct {
     pub fn reset(self: *StreamingDecompressor) void {
         self.in_buffer.clearRetainingCapacity();
         self.out_buffer.clearRetainingCapacity();
+        self.out_buffer.appendSlice(self.allocator, self.dict) catch {};
         self.stage = .header;
         self.frame_header = null;
         self.checksum_state = checksum_mod.ChecksumState.init();
@@ -139,8 +151,8 @@ pub const StreamingDecompressor = struct {
     }
 
     pub fn decompressAll(self: *StreamingDecompressor, out: []u8, in_data: []const u8) errors.ZstdError!usize {
-        _ = self;
-        return decompress_mod.decompressInto(out, in_data);
+        if (self.dict.len == 0) return decompress_mod.decompressInto(out, in_data);
+        return decompress_mod.decompressWithDict(out, in_data, self.dict);
     }
 };
 
@@ -190,6 +202,59 @@ test "StreamingDecompressor streaming" {
         if (r.out_produced == 0 and !r.needs_more) break;
     }
     try testing.expectEqualStrings(src, out[0..total]);
+}
+
+test "StreamingDecompressor initWithDict decodes a dict-compressed stream" {
+    const alloc = testing.allocator;
+    const stream_comp = @import("compress.zig");
+    const dict = "shared streaming dictionary content, used by both ends";
+    const src = "shared streaming dictionary content used here too, plus a fresh tail";
+
+    var sc = try stream_comp.StreamingCompressor.initWithDict(alloc, 3, dict);
+    defer sc.deinit();
+    var cbuf: [4096]u8 = undefined;
+    const cr = try sc.compressStream(&cbuf, src, .end);
+    const compressed = cbuf[0..cr.out_produced];
+
+    // The two encoders may emit different frame headers, so the tests below
+    // (both directions) check round-trip correctness, not byte equality.
+    const one_shot_decoded = try decompress_mod.decompressAllocWithDict(alloc, compressed, dict);
+    defer alloc.free(one_shot_decoded);
+    try testing.expectEqualStrings(src, one_shot_decoded);
+
+    var sd = try StreamingDecompressor.initWithDict(alloc, dict);
+    defer sd.deinit();
+    var out: [4096]u8 = undefined;
+    var total: usize = 0;
+    var pos: usize = 0;
+    while (pos < compressed.len) {
+        const chunk_size = @min(compressed.len - pos, 7);
+        const r = try sd.decompressStream(out[total..], compressed[pos .. pos + chunk_size]);
+        total += r.out_produced;
+        pos += chunk_size;
+        if (r.out_produced == 0 and !r.needs_more) break;
+    }
+    try testing.expectEqualStrings(src, out[0..total]);
+}
+
+test "StreamingDecompressor reset preserves the dictionary" {
+    const alloc = testing.allocator;
+    const comp_mod = @import("../compress/compress.zig");
+    const dict = "reset-preserved dictionary bytes";
+    const src = "reset-preserved dictionary payload";
+
+    const compressed = try comp_mod.compressWithDict(alloc, src, dict, .{});
+    defer alloc.free(compressed);
+
+    var sd = try StreamingDecompressor.initWithDict(alloc, dict);
+    defer sd.deinit();
+    var out: [4096]u8 = undefined;
+    _ = try sd.decompressStream(&out, compressed);
+    sd.reset();
+
+    var out2: [4096]u8 = undefined;
+    const r = try sd.decompressStream(&out2, compressed);
+    try testing.expectEqualStrings(src, out2[0..r.out_produced]);
 }
 
 fn readLE32(p: []const u8) u32 {

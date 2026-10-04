@@ -4,7 +4,7 @@
 //! Sequence bitstream: encoder states are initialised from the last
 //! sequence, symbols are emitted back-to-front (offset, match length,
 //! literal length per step) with each symbol's extra bits appended, and the
-//! final states are flushed — the exact inverse of this library's decoder.
+//! final states are flushed ï¿½ the exact inverse of this library's decoder.
 
 const std = @import("std");
 const errors = @import("../common/errors.zig");
@@ -51,14 +51,14 @@ fn mlCode(len: u32) u8 {
 
 const MatchFinder = struct {
     head: []u32, // hash -> position+1 (0 = empty)
-    prev: []u32, // chain
+    prev: []u32, // chain, indexed by position in the combined dict++src view
     hash_log: u8,
 
-    fn init(allocator: std.mem.Allocator, hash_log: u8) !MatchFinder {
+    fn init(allocator: std.mem.Allocator, hash_log: u8, total_len: usize) !MatchFinder {
         const size = @as(usize, 1) << @intCast(hash_log);
         const head = try allocator.alloc(u32, size);
         @memset(head, 0);
-        const prev = try allocator.alloc(u32, constants.block_size_max);
+        const prev = try allocator.alloc(u32, @max(total_len, 1));
         @memset(prev, 0);
         return .{ .head = head, .prev = prev, .hash_log = hash_log };
     }
@@ -132,28 +132,52 @@ fn matchLengthAt(src: []const u8, pos: usize, dist: usize, max_len: usize) usize
 /// Find sequences greedily over `src` using a hash chain plus repeat-offset
 /// candidates. Distances 1-3 are naturally covered by the initial rep
 /// history {1,4,8} and its evolution.
+///
+/// `dict` (possibly empty) is treated as content just before `src`: it seeds
+/// the hash chain so early matches can reach into it, but nothing from `dict`
+/// is ever emitted -- `anchor`/`pos` start at `dict.len` in the combined view.
 fn findSequences(
     allocator: std.mem.Allocator,
-    src: []const u8,
+    dict: []const u8,
+    data: []const u8,
     min_match_in: usize,
     search_depth_in: usize,
 ) !struct { seqs: []Seq, literals: []u8 } {
     const min_match = @max(min_match_in, 4); // hash reads 4 bytes
     const search_depth = @max(search_depth_in, 1);
 
-    var mf = try MatchFinder.init(allocator, 16);
+    // Combined dict++data view: offsets and the hash chain span both, but only
+    // positions >= dict.len can become literals or a match start. From here on
+    // `src` is just the data, with `dict` prepended.
+    const src = try allocator.alloc(u8, dict.len + data.len);
+    defer allocator.free(src);
+    @memcpy(src[0..dict.len], dict);
+    @memcpy(src[dict.len..], data);
+
+    var mf = try MatchFinder.init(allocator, 16, src.len);
     defer mf.deinit(allocator);
 
     const seqs = try allocator.alloc(Seq, 4096);
     errdefer allocator.free(seqs);
-    const literals = try allocator.alloc(u8, src.len);
+    const literals = try allocator.alloc(u8, data.len);
     errdefer allocator.free(literals);
     var n_lit: usize = 0;
     var n_seq: usize = 0;
 
     var reps = RepHistory{};
-    var anchor: usize = 0;
-    var pos: usize = 0;
+    var anchor: usize = dict.len;
+    var pos: usize = dict.len;
+
+    // Seed the chain with the dictionary region so the first real-data
+    // positions can find matches into it.
+    {
+        var dpos: usize = 0;
+        while (dpos + 4 <= dict.len) : (dpos += 1) {
+            const hh = mf.hash4(src, dpos);
+            mf.prev[dpos] = mf.head[hh];
+            mf.head[hh] = @intCast(dpos + 1);
+        }
+    }
 
     while (pos + min_match <= src.len) {
         const max_len = src.len - pos;
@@ -313,7 +337,7 @@ fn writeRawLiterals(out: []u8, literals: []const u8) usize {
     }
 }
 
-pub fn compressBlock(dst: []u8, src: []const u8, is_last: bool) errors.ZstdError!usize {
+pub fn compressBlock(dst: []u8, src: []const u8, dict: []const u8, is_last: bool) errors.ZstdError!usize {
     if (src.len == 0) {
         if (dst.len < 3) return error.DstSizeTooSmall;
         frame_block.writeBlockHeader(dst[0..3], is_last, .raw, 0);
@@ -330,7 +354,7 @@ pub fn compressBlock(dst: []u8, src: []const u8, is_last: bool) errors.ZstdError
     defer arena_inst.deinit();
     const alloc = arena_inst.allocator();
 
-    const found = findSequences(alloc, src, 4, 8) catch return rawFallback(dst, src, is_last);
+    const found = findSequences(alloc, dict, src, 4, 8) catch return rawFallback(dst, src, is_last);
 
     if (found.seqs.len == 0 or found.seqs.len > 0xFFFF + constants.long_nb_seq) {
         return rawFallback(dst, src, is_last);
@@ -463,8 +487,8 @@ fn isRle(src: []const u8) bool {
     return true;
 }
 
-pub fn compressBlockWithStrategy(dst: []u8, src: []const u8, is_last: bool, strategy: constants.Strategy, level: i32) errors.ZstdError!usize {
+pub fn compressBlockWithStrategy(dst: []u8, src: []const u8, dict: []const u8, is_last: bool, strategy: constants.Strategy, level: i32) errors.ZstdError!usize {
     _ = strategy;
     _ = level;
-    return compressBlock(dst, src, is_last);
+    return compressBlock(dst, src, dict, is_last);
 }
