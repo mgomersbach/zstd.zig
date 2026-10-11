@@ -263,8 +263,12 @@ pub const BIT_DStream = struct {
     /// bytes or an over-read both indicate corruption.
     pub fn requireCompleted(self: *BIT_DStream) errors.ZstdError!void {
         while (true) {
+            const before = self.ptr;
             switch (self.reload()) {
-                .unfinished => continue,
+                // Fewer than eight bits consumed reloads nothing: bits are
+                // left that the decoder never read, so the stream is corrupt.
+                // Without this the loop never ends on such input.
+                .unfinished => if (self.ptr == before) return error.Corruption,
                 .completed => return,
                 .end_of_buffer => return error.Corruption,
                 .overflow => return error.Corruption,
@@ -276,6 +280,16 @@ pub const BIT_DStream = struct {
 // Tests
 
 const testing = std.testing;
+
+test "requireCompleted reports unread bits as corruption instead of looping" {
+    // Sixteen bytes whose last byte holds only the end marker: after init,
+    // almost nothing is consumed and eight bytes are still ahead, so the
+    // stream is not complete. Before the fix this call never returned.
+    var src: [16]u8 = @splat(0x55);
+    src[15] = 0x80;
+    var stream = try BIT_DStream.init(&src);
+    try testing.expectError(error.Corruption, stream.requireCompleted());
+}
 
 test "BIT_CStream writes whole bytes" {
     var buf: [16]u8 = undefined;
