@@ -177,6 +177,18 @@ fn compressBlockWithConfig(
     defer body.deinit(allocator);
     body.ensureTotalCapacity(allocator, workspace_bound) catch return rawFallback(dst, src, is_last);
 
+    // Writing the literals section commits a new Huffman table to the frame's
+    // literals state. If the block then falls back to raw, the decoder never
+    // sees that table, so the state must be put back, or a later block's
+    // treeless literals would refer to a table the decoder does not hold.
+    const saved_table = entropy.literals.table;
+    const saved_available = entropy.literals.available;
+    var emitted = false;
+    defer if (!emitted) {
+        entropy.literals.table = saved_table;
+        entropy.literals.available = saved_available;
+    };
+
     // Literals. The encoder picks raw, RLE, Huffman or treeless Huffman and
     // writes the matching section header, so the decoder sees exactly the
     // layout that the following sequence bitstream assumes.
@@ -220,6 +232,7 @@ fn compressBlockWithConfig(
     // already committed by the literals section writer, which mirrors the
     // decoder keeping its table across a raw or RLE literals block.
     entropy.reps = local_reps;
+    emitted = true;
     frame_block.writeBlockHeader(dst[0..3], is_last, .compressed, @intCast(c_len));
     std.mem.copyForwards(u8, dst[3 .. 3 + c_len], body.items);
     return 3 + c_len;

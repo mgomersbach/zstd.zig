@@ -3118,3 +3118,30 @@ test "canonical golden dictionary in-memory frame" {
     defer alloc.free(restored);
     try testing.expectEqualStrings(sample, restored);
 }
+
+test "a block stored raw after its literals table was built does not leave that table in use" {
+    // The first 128 KiB block is random bytes with a slight skew, so its
+    // literals get a Huffman table that saves a byte or two, too little to
+    // pay for the block: the block is stored raw. The second block repeats
+    // runs of the first and is compressed, with literals from the same
+    // distribution. The decoder never saw the first block's table, so the
+    // second block must not refer to it.
+    const allocator = std.testing.allocator;
+    const block = 128 * 1024;
+    const src = try allocator.alloc(u8, 2 * block);
+    defer allocator.free(src);
+    var prng: std.Random.DefaultPrng = .init(7);
+    const random = prng.random();
+    for (src) |*byte| byte.* = if (random.uintLessThan(u32, 4000) < 18) 'e' else random.int(u8);
+    std.mem.copyForwards(u8, src[60000..][0..32], src[100..][0..32]);
+    var at: usize = block;
+    while (at + 64 + 16 < src.len) : (at += 64 + 16) {
+        const from = random.uintLessThan(usize, block - 64);
+        @memcpy(src[at..][0..64], src[from..][0..64]);
+    }
+    const compressed = try compressWithOptions(allocator, src, getCompressionParameters(3, src.len, 0));
+    defer allocator.free(compressed);
+    const restored = try decompress(allocator, compressed);
+    defer allocator.free(restored);
+    try std.testing.expectEqualSlices(u8, src, restored);
+}
